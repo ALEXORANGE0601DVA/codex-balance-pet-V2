@@ -1,0 +1,7 @@
+# 这个项目在 Windows 上运行，文本文件检出时一律用 CRLF
+# （.cmd 的括号块在只有 LF 换行时可能被 cmd.exe 解析错）
+* text=auto eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
