@@ -1,0 +1,29 @@
+{
+  "name": "balance",
+  "version": "1.0.0",
+  "description": "Show the live balance of the configured API account (DeepSeek and DeepSeek-compatible endpoints).",
+  "author": {
+    "name": "local"
+  },
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "实时余额",
+    "shortDescription": "查看账户实时余额",
+    "longDescription": "在对话中实时查询当前 API 账户余额（不缓存），支持设置低余额提醒阈值。默认读取 Codex 配置中的当前模型服务商与密钥，无需重复填写。",
+    "developerName": "local",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "composerIcon": "./assets/balance.svg",
+    "logo": "./assets/balance.svg",
+    "defaultPrompt": [
+      "查一下我的账户实时余额",
+      "余额低于 20 元时提醒我"
+    ],
+    "brandColor": "#4D6BFE",
+    "screenshots": []
+  }
+}
