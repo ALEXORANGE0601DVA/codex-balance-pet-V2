@@ -3,7 +3,7 @@
 
   做四件事：
     1. pet\                    -> <CodexHome>\pets\balance-pet\                     桌宠常驻副本
-    2. plugin\plugins\balance  -> <CodexHome>\local-marketplaces\balance\plugins\balance
+    2. plugin\                 -> <CodexHome>\local-marketplaces\balance\（含市场清单）
        并把桌宠的启动链（pet-host.ps1 / winless-launch.ps1 / scripts\launch_balance_pet.cmd）放进插件目录
     3. 在插件目录的 .mcp.json 里确保注册 balance 与 balance_pet 两个 MCP 服务
     4. 启动桌宠并打印状态
@@ -27,16 +27,19 @@ $ErrorActionPreference = 'Stop'
 if (-not $CodexHome) {
   if ($env:CODEX_HOME) { $CodexHome = $env:CODEX_HOME } else { $CodexHome = Join-Path $env:USERPROFILE '.codex' }
 }
+$CodexHome = [System.IO.Path]::GetFullPath($CodexHome)
 
 $repoRoot     = Split-Path $PSScriptRoot -Parent
 $petSource    = Join-Path $repoRoot 'pet'
 $pluginSource = Join-Path $repoRoot 'plugin\plugins\balance'
-foreach ($required in @($petSource, $pluginSource)) {
+$marketplaceSource = Join-Path $repoRoot 'plugin\.agents\plugins\marketplace.json'
+foreach ($required in @($petSource, $pluginSource, $marketplaceSource)) {
   if (-not (Test-Path -LiteralPath $required)) { throw ('仓库不完整，缺少：' + $required) }
 }
 
 $liveRoot    = Join-Path $CodexHome 'pets\balance-pet'
-$marketplace = Join-Path $CodexHome 'local-marketplaces\balance\plugins\balance'
+$marketplaceRoot = Join-Path $CodexHome 'local-marketplaces\balance'
+$marketplace = Join-Path $marketplaceRoot 'plugins\balance'
 $cacheRoot   = Join-Path $CodexHome 'plugins\cache\local\balance'
 
 Write-Host ('Codex home : ' + $CodexHome)
@@ -51,6 +54,25 @@ function Get-PetProcesses {
       Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like ('*' + $petName + '*') })
   }
   return $found
+}
+
+function New-PetLaunchStartInfo {
+  param([string]$CodexDirectory, [string]$PetDirectory, [string]$AccountScript)
+  $start = [System.Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+  $start.ArgumentList.Add('/d')
+  $start.ArgumentList.Add('/s')
+  $start.ArgumentList.Add('/c')
+  $start.ArgumentList.Add('call')
+  $start.ArgumentList.Add((Join-Path $PetDirectory '启动余额桌宠.cmd'))
+  $start.WorkingDirectory = $PetDirectory
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  # Pass the selected installation only to this child and its descendants.
+  $start.Environment['CODEX_HOME'] = $CodexDirectory
+  $start.Environment['BALANCE_ACCOUNT_SCRIPT'] = $AccountScript
+  return $start
 }
 
 Write-Host '=== 1) 停掉正在运行的桌宠（立绘文件被占用时无法更新）==='
@@ -79,6 +101,9 @@ Get-ChildItem -LiteralPath $liveRoot -File | Select-Object -ExpandProperty Name
 
 Write-Host '=== 3) 插件 -> 插件市场目录 ==='
 New-Item -ItemType Directory -Force -Path $marketplace | Out-Null
+$marketplaceMetadata = Join-Path $marketplaceRoot '.agents\plugins'
+New-Item -ItemType Directory -Force -Path $marketplaceMetadata | Out-Null
+Copy-Item -LiteralPath $marketplaceSource -Destination (Join-Path $marketplaceMetadata 'marketplace.json') -Force
 Copy-Item -Path (Join-Path $pluginSource '*') -Destination $marketplace -Recurse -Force
 # 桌宠常驻服务的启动链必须跟着插件走（Codex 只会加载插件目录里的东西）
 Copy-Item -LiteralPath (Join-Path $petSource 'pet-host.ps1') -Destination $marketplace -Force
@@ -126,7 +151,9 @@ Write-Host '=== 6) 启动桌宠 ==='
 if ($NoRestart) {
   Write-Host '    -NoRestart：跳过'
 } else {
-  Start-Process -FilePath (Join-Path $liveRoot '启动余额桌宠.cmd') -WindowStyle Hidden
+  $launchInfo = New-PetLaunchStartInfo -CodexDirectory $CodexHome -PetDirectory $liveRoot -AccountScript (Join-Path $marketplace 'account.mjs')
+  $launcher = [System.Diagnostics.Process]::Start($launchInfo)
+  if ($launcher) { $launcher.Dispose() }
   Start-Sleep -Seconds 12
   $statusFile = Join-Path ([System.IO.Path]::GetTempPath()) 'balance-pet-status.json'
   Write-Host ('    桌宠实例数：' + (Get-PetProcesses).Count)

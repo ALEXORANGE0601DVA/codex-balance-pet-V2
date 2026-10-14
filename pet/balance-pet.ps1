@@ -5,7 +5,7 @@
     · 实时余额显示在脚下的牌子，默认 30 秒刷新一次
     · 按住任意位置拖动，位置会记住（pet-state.json）
     · 点一下：冒一句台词 + 换表情，并立刻刷新余额
-    · 余额低于阈值时表情自动变难过；闲置两分半开始打盹
+    · 余额低于阈值时表情自动变难过；跑任务时写字，闲置时恢复常态
     · 偶尔眨眼；右键有菜单（立即刷新 / 重置位置 / 打个招呼 / 退出）
     · 透明区域不挡鼠标，可以直接点下面的窗口
 
@@ -46,20 +46,21 @@ $script:AssetDir   = Join-Path $PSScriptRoot 'assets'
 $script:StateFile  = Join-Path $PSScriptRoot 'pet-state.json'
 $script:DataDir    = Join-Path $PSScriptRoot 'data'
 $script:BalanceLogFile = Join-Path $script:DataDir 'balance-log.csv'
-$script:SessionsDir = Join-Path $env:USERPROFILE '.codex\sessions'
+$script:SessionsDir = Join-Path $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }) 'sessions'
 $script:CanvasW    = 340
 $script:CanvasH    = 562
 $script:SpriteW    = 320
 $script:SpriteH    = 400
 $script:SpriteX    = 10
 $script:SpriteY    = 84
+$script:AccountCodexRoot = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $script:AccountScript = $null
 foreach ($script:AccountCandidate in @(
     $env:BALANCE_ACCOUNT_SCRIPT,
     (Join-Path (Split-Path $PSScriptRoot -Parent) 'plugin\plugins\balance\account.mjs'),
     (Join-Path (Split-Path $PSScriptRoot -Parent) 'balance-plugin\plugins\balance\account.mjs'),
-    (Join-Path $env:USERPROFILE '.codex\local-marketplaces\balance\plugins\balance\account.mjs'),
-    (Join-Path $env:USERPROFILE '.codex\plugins\cache\local\balance\1.0.0\account.mjs'),
+    (Join-Path $script:AccountCodexRoot 'local-marketplaces\balance\plugins\balance\account.mjs'),
+    (Join-Path $script:AccountCodexRoot 'plugins\cache\local\balance\1.0.0\account.mjs'),
     (Join-Path $PSScriptRoot 'account.mjs')
   )) {
   if ($script:AccountCandidate -and (Test-Path -LiteralPath $script:AccountCandidate)) {
@@ -402,6 +403,8 @@ $script:FontStats  = New-Object System.Drawing.Font('Microsoft YaHei UI', 14, [S
 #region 用量统计与余额记录
 
 . (Join-Path $PSScriptRoot 'usage-reader.ps1')
+. (Join-Path $PSScriptRoot 'task-activity.ps1')
+Initialize-TaskActivity -SessionsDirectory $script:SessionsDir -CodexDirectory (Get-CodexHome)
 
 function Format-Count {
   param([double]$Value)
@@ -836,6 +839,10 @@ $script:State = @{
   HasAccountSnapshot = $false
   IsRefreshing    = $false
   QueryStartedAt  = [datetime]::MinValue
+  TaskBusy        = $false
+  ActiveTasks     = 0
+  TaskPhase       = 'unverified'
+  WorkStartedAt   = [datetime]::UtcNow
   Bob             = 0
   BobPhase        = 0.0
   StatsText       = ''
@@ -872,6 +879,30 @@ function Get-RenderedBubble {
   return $script:State.Bubble
 }
 
+function Get-RenderedExpression {
+  if ($script:State.TaskBusy -and $script:WorkingAtlas) { return 'working' }
+  return $script:State.Expression
+}
+
+function Get-WorkingFrame {
+  if (-not $script:State.TaskBusy) { return 0 }
+  $elapsed = [Math]::Max(0, ([datetime]::UtcNow - $script:State.WorkStartedAt).TotalMilliseconds)
+  return ([int][Math]::Floor($elapsed / 160) % 4)
+}
+
+function Update-PetTaskActivity {
+  $result = Update-TaskActivity
+  $wasBusy = [bool]$script:State.TaskBusy
+  $script:State.TaskBusy = [bool]$result.IsBusy
+  $script:State.ActiveTasks = [int]$result.ActiveCount
+  $script:State.TaskPhase = $result.Phase
+  if ($script:State.TaskBusy -and -not $wasBusy) { $script:State.WorkStartedAt = [datetime]::UtcNow }
+  if ($wasBusy -and -not $script:State.TaskBusy) {
+    $script:State.Expression = if ($script:State.LowBalance) { 'sad' } else { 'normal' }
+    $script:State.LastInteraction = Get-Date
+  }
+}
+
 function Write-PetStatus {
   try {
     $file = Join-Path ([System.IO.Path]::GetTempPath()) 'balance-pet-status.json'
@@ -881,7 +912,7 @@ function Write-PetStatus {
       visible     = $script:Form.Visible
       handle      = [int64]0
       location    = "$($script:Form.Location.X),$($script:Form.Location.Y)"
-      expression  = $script:State.Expression
+      expression  = Get-RenderedExpression
       look        = if ($script:LookFiles.Count -gt 0) { [System.IO.Path]::GetFileNameWithoutExtension($script:LookFiles[$script:LookIndex]) } else { $null }
       lookCount   = $script:LookFiles.Count
       balance     = $script:State.BalanceText
@@ -899,6 +930,10 @@ function Write-PetStatus {
       stats_text  = $script:State.StatsText
       token_requests = $script:Usage.Requests
       token_output = $script:Usage.Output
+      task_busy   = [bool]$script:State.TaskBusy
+      active_tasks = $script:State.ActiveTasks
+      task_phase  = $script:State.TaskPhase
+      animation_frame = Get-WorkingFrame
     }
     try { $payload.handle = $script:Form.Handle.ToInt64() } catch { }
     ($payload | ConvertTo-Json -Compress) | Set-Content -LiteralPath $file -Encoding utf8
@@ -908,16 +943,18 @@ function Write-PetStatus {
 function Sync-Frame {
   param([switch]$Force)
   $bubble = Get-RenderedBubble
-  $signature = "$($script:State.Expression)|$bubble|$($script:State.BalanceText)|$($script:State.StatusColor)|$($script:State.StatsText)|$($script:State.ShowStats)"
+  $expression = Get-RenderedExpression
+  $animationFrame = Get-WorkingFrame
+  $signature = "$expression|$animationFrame|$bubble|$($script:State.BalanceText)|$($script:State.StatusColor)|$($script:State.StatsText)|$($script:State.ShowStats)"
   if (-not $Force -and $signature -eq $script:State.LastSignature) { return }
   $script:State.LastSignature = $signature
 
-  $frame = New-PetFrame -Expression $script:State.Expression -Bubble $bubble `
-    -BalanceText $script:State.BalanceText -StatusColor $script:State.StatusColor -Bob 0
+  $frame = New-PetFrame -Expression $expression -Bubble $bubble `
+    -BalanceText $script:State.BalanceText -StatusColor $script:State.StatusColor -Bob 0 -AnimationFrame $animationFrame
   if ($script:State.Frame) { $script:State.Frame.Dispose() }
   $script:State.Frame = $frame
   [PetLayer]::Push($script:Form.Handle, $frame, $script:BaseX, ($script:BaseY + $script:Bob))
-  if ($script:State.IsRefreshing) { Write-PetStatus }
+  if ($script:State.IsRefreshing -or $script:State.TaskBusy) { Write-PetStatus }
 }
 
 function Set-Bob {
@@ -1246,15 +1283,8 @@ $animTimer.Add_Tick({
   }
   if ($state.Expression -eq 'blink' -and $now -gt $state.BlinkUntil) { $state.Expression = 'normal' }
 
-  # 闲置打盹
-  $idle = ($now - $state.LastInteraction).TotalSeconds
-  if ($idle -gt $IdleSleepSeconds -and $state.Expression -ne 'sleepy' -and -not $state.Bubble -and -not $state.IsRefreshing) {
-    $state.Expression = 'sleepy'
-  }
-  if ($idle -lt 2 -and $state.Expression -eq 'sleepy') {
-    $state.Expression = 'normal'
-    $state.LastInteraction = $now
-  }
+  # 无任务时保持所选常态；任务动画与鼠标闲置时间无关。
+  if (-not $state.TaskBusy -and $state.Expression -eq 'sleepy') { $state.Expression = 'normal' }
 
   # 呼吸浮动
   if ($state.Expression -eq 'sleepy') {
@@ -1302,21 +1332,31 @@ $statsTimer.Add_Tick({
   Write-PetStatus
 })
 
+$taskTimer = New-Object System.Windows.Forms.Timer
+$taskTimer.Interval = 2000
+$taskTimer.Add_Tick({
+  Update-PetTaskActivity
+  Sync-Frame
+  Write-PetStatus
+})
+
 $form.Add_Shown({
   [PetLayer]::MakeLayered($script:Form.Handle)
   Update-Balance
   Update-UsageStats
+  Update-PetTaskActivity
   if ($script:State.ShowStats) { Update-StatsText }
   $script:State.Expression = if ($script:State.LowBalance) { 'sad' } else { 'normal' }
   Sync-Frame -Force
   $animTimer.Start()
   $balanceTimer.Start()
   $statsTimer.Start()
+  $taskTimer.Start()
   if (-not $DisableWatchdog) { $watchdogTimer.Start() }
 })
 
 $form.Add_FormClosed({
-  $animTimer.Stop(); $balanceTimer.Stop(); $statsTimer.Stop(); $watchdogTimer.Stop()
+  $animTimer.Stop(); $balanceTimer.Stop(); $statsTimer.Stop(); $watchdogTimer.Stop(); $taskTimer.Stop()
   if ($script:AccountWorker) {
     try { $script:AccountWorker.Stop(); $script:AccountWorker.Dispose() } catch { }
   }
@@ -1324,6 +1364,10 @@ $form.Add_FormClosed({
   Save-PetPosition
   if ($script:State.Frame) { $script:State.Frame.Dispose() }
   foreach ($sprite in $script:Sprites.Values) { $sprite.Dispose() }
+  if ($script:WorkingAtlas) { $script:WorkingAtlas.Dispose() }
+  if ($script:TaskActivity.StoreProcess) {
+    try { if (-not $script:TaskActivity.StoreProcess.HasExited) { $script:TaskActivity.StoreProcess.Kill() }; $script:TaskActivity.StoreProcess.Dispose() } catch { }
+  }
 })
 
 [void]$form.ShowDialog()

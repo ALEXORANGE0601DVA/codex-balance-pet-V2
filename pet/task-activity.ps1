@@ -33,7 +33,7 @@ function Get-TaskRuntime {
   if ($state.RuntimeReader) { return (& $state.RuntimeReader) }
   # Exclude the CLI bin process used by balance account/rateLimits/read. A GUI
   # lifetime is corroboration for persistent history, not proof of a live turn.
-  $processes = @(Get-Process -Name Codex -ErrorAction SilentlyContinue | Where-Object {
+  $processes = @(Get-Process -Name Codex,ChatGPT -ErrorAction SilentlyContinue | Where-Object {
     try { $_.Path -and $_.Path -notmatch '(?i)[\\/]bin[\\/][^\\/]+[\\/]codex\.exe$' } catch { $false }
   })
   if (-not $processes.Count) { return [pscustomobject]@{ Running=$false; StartedAt=$null } }
@@ -104,6 +104,7 @@ function New-TaskRolloutState {
 
 function Read-TaskEvent {
   param([hashtable]$FileState, [string]$Line, [bool]$Historical)
+  if ($Line.Length -gt 8192) { return }
   if ($Line -notlike '*"session_meta"*' -and $Line -notlike '*"event_msg"*' -and $Line -notlike '*"response_item"*') { return }
   try { $record=$Line | ConvertFrom-Json -ErrorAction Stop } catch { return }
   $payload=$record.payload

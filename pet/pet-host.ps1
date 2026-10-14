@@ -21,7 +21,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 if (-not $PetScript) {
   foreach ($candidate in @(
       (Join-Path $PSScriptRoot 'balance-pet.ps1'),
-      (Join-Path $env:USERPROFILE '.codex\pets\balance-pet\balance-pet.ps1'),
+      (Join-Path $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }) 'pets\balance-pet\balance-pet.ps1'),
       (Join-Path (Split-Path $PSScriptRoot -Parent) 'pet\balance-pet.ps1')
     )) {
     if ($candidate -and (Test-Path -LiteralPath $candidate)) { $PetScript = $candidate; break }
